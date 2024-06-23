@@ -46,6 +46,37 @@ from gluonts.transform import (
 
 from chronos import ChronosConfig, ChronosTokenizer
 
+import torch.nn as nn
+from transformers import T5ForConditionalGeneration
+
+
+class T5ForMeanScale(T5ForConditionalGeneration):
+    def __init__(self, config):
+        super().__init__(config)
+        # Additional layer to project the hidden states to mean and scale
+        self.mean_scale_head = nn.Linear(config.d_model, 2)  # Output two values: mean and scale
+
+    def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
+                head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
+                past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
+                use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
+        # Get the standard outputs from the original T5 model
+        outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask,
+                                  decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
+                                  head_mask=head_mask, decoder_head_mask=decoder_head_mask,
+                                  cross_attn_head_mask=cross_attn_head_mask, encoder_outputs=encoder_outputs,
+                                  past_key_values=past_key_values, inputs_embeds=inputs_embeds,
+                                  decoder_inputs_embeds=decoder_inputs_embeds, labels=labels,
+                                  use_cache=use_cache, output_attentions=output_attentions,
+                                  output_hidden_states=output_hidden_states, return_dict=return_dict)
+
+        # Use the last hidden state of the decoder (outputs.last_hidden_state)
+        hidden_states = outputs.last_hidden_state
+
+        # Pass through the custom head to get mean and scale
+        mean_scale = self.mean_scale_head(hidden_states[:, -1, :])  # Use the hidden state of the last token
+
+        return mean_scale
 
 app = typer.Typer(pretty_exceptions_enable=False)
 
@@ -170,24 +201,25 @@ def load_model(
     """
     assert model_type in ["seq2seq", "causal"]
     AutoModelClass = (
-        AutoModelForSeq2SeqLM if model_type == "seq2seq" else AutoModelForCausalLM
-    )
+        T5ForMeanScale if model_type == "seq2seq" else None
+    )  # Load T5ForMeanScale for seq2seq model type
+
     if random_init:
-        log_on_main("Using random initialization", logger)
-        config = AutoConfig.from_pretrained(model_id)
-        if isinstance(config, T5Config):
-            # The default initializer_factor (1.0) in transformers is too large
-            config.initializer_factor = 0.05
+        print("Using random initialization")
+        config = T5Config.from_pretrained(model_id)
+        # Modify config as needed for T5ForMeanScale
+        config.initializer_factor = 0.05
         config.tie_word_embeddings = tie_embeddings
-        model = AutoModelClass.from_config(config)
+
+        model = AutoModelClass(config)
     else:
-        log_on_main(f"Using pretrained initialization from {model_id}", logger)
+        print(f"Using pretrained initialization from {model_id}")
         model = AutoModelClass.from_pretrained(model_id)
 
     model.resize_token_embeddings(vocab_size)
 
-    model.config.pad_token_id = model.generation_config.pad_token_id = pad_token_id
-    model.config.eos_token_id = model.generation_config.eos_token_id = eos_token_id
+    model.config.pad_token_id = pad_token_id
+    model.config.eos_token_id = eos_token_id
 
     return model
 
