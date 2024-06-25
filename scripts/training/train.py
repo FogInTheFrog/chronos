@@ -729,21 +729,20 @@ def main(
         partition = partition.to(sigma.device)
         torch_sqrt = torch.tensor(1.4142135623730951)
         torch_sqrt = torch_sqrt.to(sigma.device)
-        print(f"partition.shape={partition.shape}")
-        print(f"0..3={partition[:3]} and -3={partition[-3:]}")
-        print(f"devices: mu:{mu.device} sigma:{sigma.device} partition:{partition.device}")
 
         # Calculate the cumulative distribution function values
         cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
-        print(f"cdf.shape={cdf.shape}")
+
         # Append 1 to the cdf values
+        # Note: cdf[i] == P(x < pt[i]), cdf[-1] == P(x < float('inf')) == 1
         cdf = torch.cat([cdf, torch.tensor([1.0]).to(sigma.device)])
 
-        # Calculate the differences to get probabilities
+        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
         probs = cdf[1:] - cdf[:-1]
 
-        zeros = torch.tensor([0], device=probs.device)
-        probs = torch.cat([zeros, probs, zeros])
+        # Prepend P(x < pt[0]) to censored probs
+        init_prob = torch.tensor([cdf[0]], device=probs.device)
+        probs = torch.cat([init_prob, probs])
 
         return probs
 
