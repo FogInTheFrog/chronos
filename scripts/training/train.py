@@ -15,6 +15,7 @@ from functools import partial
 from typing import List, Iterator, Optional, Dict
 
 import typer
+from scipy.stats import norm
 from typer_config import use_yaml_config
 import numpy as np
 import torch
@@ -54,14 +55,14 @@ class T5ForMeanScale(T5ForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
         # Additional layer to project the hidden states to mean and scale
-        self.mean_scale_head = nn.Linear(config.d_model, 2)  # Output two values: mean and scale
+        self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
 
     def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
                 head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
                 use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
         # Get the standard outputs from the original T5 model
-        print(f"jestem tu: {input_ids} and {inputs_embeds}")
+        print(f"input_ids.shape:{input_ids.shape}")
         print(f"input_ids={input_ids},"
               f"\nattention_mask={attention_mask},"
               f"\ndecoder_input_ids={decoder_input_ids},"
@@ -76,20 +77,21 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                                   use_cache=use_cache, output_attentions=output_attentions,
                                   output_hidden_states=output_hidden_states, return_dict=return_dict)
 
-        print(f"outputs:{outputs}")
 
-        # # Use the last hidden state of the decoder (outputs.last_hidden_state)
-        # hidden_states = outputs.last_hidden_state
-        #
-        # # Pass through the custom head to get mean and scale
-        # mean_scale = self.mean_scale_head(hidden_states[:, -1, :])  # Use the hidden state of the last token
-        #
-        # mean = mean_scale[:, 0]
-        # scale = torch.maximum(mean_scale[:, 1], torch.tensor(1e-10, device=mean_scale.device))
-        #
-        # return torch.stack((mean, scale), dim=-1)
+        # Use the last hidden state of the decoder (outputs.last_hidden_state)
+        hidden_states = outputs.logits
+        print(f"hidden_states.shape={hidden_states.shape}")
 
-        return outputs
+        # Pass through the custom head to get mean and scale
+        mean_scale = self.mean_scale_head(hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
+
+        print(mean_scale.shape)
+        mean = mean_scale[:, 0]
+        scale = torch.maximum(mean_scale[:, 1], torch.tensor(1e-10, device=mean_scale.device))
+
+        return torch.stack((mean, scale), dim=-1), labels
+
+        # return outputs
 
 
 app = typer.Typer(pretty_exceptions_enable=False)
@@ -682,7 +684,7 @@ def main(
     # Add extra items to model config so that it's saved in the ckpt
     model.config.chronos_config = chronos_config.__dict__
 
-    shuffled_train_dataset = ChronosDataset(
+    shuffled_train_dataset_old = ChronosDataset(
         datasets=train_datasets,
         probabilities=probability,
         tokenizer=chronos_config.create_tokenizer(),
@@ -692,7 +694,9 @@ def main(
         model_type=model_type,
         imputation_method=LastValueImputation() if model_type == "causal" else None,
         mode="training",
-    ).shuffle(shuffle_buffer_length=shuffle_buffer_length)
+    )
+
+    shuffled_train_dataset = shuffled_train_dataset_old.shuffle(shuffle_buffer_length=shuffle_buffer_length)
 
     # Define training args
     training_args = TrainingArguments(
@@ -716,18 +720,33 @@ def main(
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
     )
-    
-    
+
+    import torch.special as special
+
     def cg(mu, sigma, partition):
-        """Censored Gaussian."""
-        partition = np.sort(partition)
-        quantiles = np.hstack([
-            norm.cdf(partition, loc=mu, scale=sigma),
-            np.array([1.])
-        ])
-        quantiles[1:] -= quantiles[:-1]
-        probs = quantiles
+        """Censored Gaussian using PyTorch."""
+        partition = torch.sort(partition).values
+        partition = partition.to(sigma.device)
+        torch_sqrt = torch.tensor(1.4142135623730951)
+        torch_sqrt = torch_sqrt.to(sigma.device)
+        print(f"partition.shape={partition.shape}")
+        print(f"0..3={partition[:3]} and -3={partition[-3:]}")
+        print(f"devices: mu:{mu.device} sigma:{sigma.device} partition:{partition.device}")
+
+        # Calculate the cumulative distribution function values
+        cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
+        print(f"cdf.shape={cdf.shape}")
+        # Append 1 to the cdf values
+        cdf = torch.cat([cdf, torch.tensor([1.0]).to(sigma.device)])
+
+        # Calculate the differences to get probabilities
+        probs = cdf[1:] - cdf[:-1]
+
+        zeros = torch.tensor([0], device=probs.device)
+        probs = torch.cat([zeros, probs, zeros])
+
         return probs
+
 
     class CustomTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
@@ -735,23 +754,25 @@ def main(
             # https://github.com/huggingface/transformers/blob/main/src/transformers/trainer.py#L3328
             # as in standard compute_loss
             # super().compute_loss(self, model, inputs)
-            if self.label_smoother is not None and "labels" in inputs:
-                labels = inputs.pop("labels")
-            else:
-                labels = None
+            # if self.label_smoother is not None and "labels" in inputs:
+            #     labels = inputs.pop("labels")
+            # else:
+            #     labels = None
             outputs = model(**inputs)
-            print(f"Mu:{outputs[:, 1]} and Sigma:{outputs[:, 1]}")
-            mu, sigma = outputs[:, 0], outputs[:, 1]
+            outputs, labels = outputs[0], outputs[1]
+            print(f"outputs={outputs.shape}")
+            print(f"labels={labels.shape}")
 
             #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
             # those partition should be already sorted
-            partition = shuffled_train_dataset.tokenizer.boundaries
+            partition = shuffled_train_dataset_old.tokenizer.boundaries
 
-
-            probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
-
+            # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
+            # outputs = outputs.transpose(0, 1)
+            probs = torch.stack([cg(output[0], output[1], partition) for output in outputs])
+            print(probs.shape)
             nll_loss = nn.NLLLoss()
-            loss = nll_loss(probs, labels)
+            loss = nll_loss(probs, labels.view(-1))
 
             # as in standard compute_loss
             return (loss, outputs) if return_outputs else loss
