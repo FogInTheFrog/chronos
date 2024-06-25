@@ -61,6 +61,12 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
                 use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
         # Get the standard outputs from the original T5 model
+        print(f"jestem tu: {input_ids} and {inputs_embeds}")
+        print(f"input_ids={input_ids},"
+              f"\nattention_mask={attention_mask},"
+              f"\ndecoder_input_ids={decoder_input_ids},"
+              f"\ndecoder_attention_mask={decoder_attention_mask},"
+              f"\ndecoder_inputs_embeds={decoder_inputs_embeds}")
         outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask,
                                   decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
                                   head_mask=head_mask, decoder_head_mask=decoder_head_mask,
@@ -70,16 +76,20 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                                   use_cache=use_cache, output_attentions=output_attentions,
                                   output_hidden_states=output_hidden_states, return_dict=return_dict)
 
-        # Use the last hidden state of the decoder (outputs.last_hidden_state)
-        hidden_states = outputs.last_hidden_state
+        print(f"outputs:{outputs}")
 
-        # Pass through the custom head to get mean and scale
-        mean_scale = self.mean_scale_head(hidden_states[:, -1, :])  # Use the hidden state of the last token
+        # # Use the last hidden state of the decoder (outputs.last_hidden_state)
+        # hidden_states = outputs.last_hidden_state
+        #
+        # # Pass through the custom head to get mean and scale
+        # mean_scale = self.mean_scale_head(hidden_states[:, -1, :])  # Use the hidden state of the last token
+        #
+        # mean = mean_scale[:, 0]
+        # scale = torch.maximum(mean_scale[:, 1], torch.tensor(1e-10, device=mean_scale.device))
+        #
+        # return torch.stack((mean, scale), dim=-1)
 
-        mean = mean_scale[:, 0]
-        scale = torch.maximum(mean_scale[:, 1], torch.tensor(1e-10, device=mean_scale.device))
-
-        return torch.stack((mean, scale), dim=-1)
+        return outputs
 
 
 app = typer.Typer(pretty_exceptions_enable=False)
@@ -222,8 +232,8 @@ def load_model(
 
     model.resize_token_embeddings(vocab_size)
 
-    model.config.pad_token_id = pad_token_id
-    model.config.eos_token_id = eos_token_id
+    model.config.pad_token_id = model.generation_config.pad_token_id = pad_token_id
+    model.config.eos_token_id = model.generation_config.eos_token_id = eos_token_id
 
     return model
 
@@ -724,9 +734,13 @@ def main(
 
             # https://github.com/huggingface/transformers/blob/main/src/transformers/trainer.py#L3328
             # as in standard compute_loss
-            labels = inputs.pop("labels")
+            # super().compute_loss(self, model, inputs)
+            if self.label_smoother is not None and "labels" in inputs:
+                labels = inputs.pop("labels")
+            else:
+                labels = None
             outputs = model(**inputs)
-
+            print(f"Mu:{outputs[:, 1]} and Sigma:{outputs[:, 1]}")
             mu, sigma = outputs[:, 0], outputs[:, 1]
 
             #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
@@ -741,7 +755,7 @@ def main(
 
             # as in standard compute_loss
             return (loss, outputs) if return_outputs else loss
-    
+
 
     # Create Trainer instance
     trainer = CustomTrainer(
