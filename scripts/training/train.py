@@ -76,7 +76,11 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         # Pass through the custom head to get mean and scale
         mean_scale = self.mean_scale_head(hidden_states[:, -1, :])  # Use the hidden state of the last token
 
-        return mean_scale
+        mean = mean_scale[:, 0]
+        scale = torch.maximum(mean_scale[:, 1], torch.tensor(1e-10, device=mean_scale.device))
+
+        return torch.stack((mean, scale), dim=-1)
+
 
 app = typer.Typer(pretty_exceptions_enable=False)
 
@@ -529,6 +533,9 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         else:
             for entry in itertools.chain(*iterators):
                 yield self.to_hf_format(entry)
+                
+                
+                
 
 
 @app.command()
@@ -699,9 +706,45 @@ def main(
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
     )
+    
+    
+    def cg(mu, sigma, partition):
+        """Censored Gaussian."""
+        partition = np.sort(partition)
+        quantiles = np.hstack([
+            norm.cdf(partition, loc=mu, scale=sigma),
+            np.array([1.])
+        ])
+        quantiles[1:] -= quantiles[:-1]
+        probs = quantiles
+        return probs
+
+    class CustomTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False):
+
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/trainer.py#L3328
+            # as in standard compute_loss
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+
+            mu, sigma = outputs[:, 0], outputs[:, 1]
+
+            #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
+            # those partition should be already sorted
+            partition = shuffled_train_dataset.tokenizer.boundaries
+
+
+            probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
+
+            nll_loss = nn.NLLLoss()
+            loss = nll_loss(probs, labels)
+
+            # as in standard compute_loss
+            return (loss, outputs) if return_outputs else loss
+    
 
     # Create Trainer instance
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=shuffled_train_dataset,
