@@ -723,8 +723,22 @@ def main(
 
     import torch.special as special
 
+
     def cg(mu, sigma, partition):
-        """Censored Gaussian using PyTorch."""
+        """Censored Gaussian using PyTorch.
+
+        In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
+        Out: a 1d tensor of length N + 1:
+        [
+            P(x < pt[0]),
+            P(pt[0] < x < pt[1]),
+             ...,
+            P(pt[N - 2] < x < pt[N - 1]),
+            P(pt[N - 1] < x)
+        ]
+        for x ~ normal(mu, sigma)
+        """
+
         partition = torch.sort(partition).values
         partition = partition.to(sigma.device)
         torch_sqrt = torch.tensor(1.4142135623730951)
