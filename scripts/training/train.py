@@ -87,7 +87,7 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         print(mean_scale.shape)
         mean = mean_scale[:, 0]
-        scale = torch.maximum(mean_scale[:, 1], torch.tensor(1e-10, device=mean_scale.device))
+        scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
 
         return torch.stack((mean, scale), dim=-1), labels
 
@@ -783,9 +783,19 @@ def main(
             # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
             # outputs = outputs.transpose(0, 1)
             probs = torch.stack([cg(output[0], output[1], partition) for output in outputs])
+            
+            # clipped prob so that log prob wont be -inf
+            probs = torch.clamp(probs, min=1e-10, max=1.0 - 1e-10)
+
+            log_probs = torch.log(probs)
+            
             print(probs.shape)
-            nll_loss = nn.NLLLoss()
-            loss = nll_loss(probs, labels.view(-1))
+            
+            # that model that we use say to ignore token -100,
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
+            # as far as i know it is even default version 
+            nll_loss = nn.NLLLoss(ignore_index=-100)
+            loss = nll_loss(log_probs, labels.view(-1))
 
             # as in standard compute_loss
             return (loss, outputs) if return_outputs else loss
