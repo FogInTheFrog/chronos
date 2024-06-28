@@ -56,7 +56,9 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         super().__init__(config)
         # Additional layer to project the hidden states to mean and scale
         self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
-
+        torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
+        
+        
     def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
                 head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
