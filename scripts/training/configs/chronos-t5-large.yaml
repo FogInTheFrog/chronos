@@ -1,4 +1,4 @@
-training_data_paths:
+t training_data_paths:
 - "/home/ubuntu/tsmixup-data.arrow"
 - "/home/ubuntu/kernelsynth-data.arrow"
 probability:

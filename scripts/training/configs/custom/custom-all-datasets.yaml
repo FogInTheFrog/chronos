@@ -1,7 +1,19 @@
+# This file loads all datasets contained in chronos/datasets (but do verify
+# manually that no dataset is left behind.)
 training_data_paths:
 - "/home/elan/chronos/datasets/mydata500series.arrow"
+- "/home/elan/chronos/datasets/spanish_energy_weather.arrow"
+- "/home/elan/chronos/datasets/wikidaily.arrow"
+- "/home/elan/chronos/datasets/mexico_city_bikes.arrow"
+- "/home/elan/chronos/datasets/brazilian_cities_temperature.arrow"
+- "/home/elan/chronos/datasets/taxi.arrow"
 probability:
-- 1.0
+- 0.2
+- 0.2
+- 0.2
+- 0.2
+- 0.1
+- 0.1
 context_length: 512
 prediction_length: 64
 min_past: 60

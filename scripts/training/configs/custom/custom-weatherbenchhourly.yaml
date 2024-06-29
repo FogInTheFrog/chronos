@@ -1,5 +1,7 @@
+# This file loads all datasets contained in chronos/datasets (but do verify
+# manually that no dataset is left behind.)
 training_data_paths:
-- "/home/elan/chronos/datasets/mydata500series.arrow"
+- "/home/elan/chronos/datasets/weatherbenchhourly.arrow"
 probability:
 - 1.0
 context_length: 512

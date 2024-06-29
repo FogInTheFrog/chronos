@@ -1,11 +1,13 @@
+# This file loads all datasets contained in chronos/datasets (but do verify
+# manually that no dataset is left behind.)
 training_data_paths:
-- "/home/elan/chronos/datasets/mydata500series.arrow"
+- "/home/elan/chronos/datasets/mexico_city_bikes.arrow"
 probability:
-- 1.0
+- 1
 context_length: 512
 prediction_length: 64
 min_past: 60
-max_steps: 20
+max_steps: 200_000
 save_steps: 100_000
 log_steps: 500
 per_device_train_batch_size: 2 #32
