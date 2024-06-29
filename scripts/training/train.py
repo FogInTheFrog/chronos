@@ -16,6 +16,7 @@ from typing import List, Iterator, Optional, Dict
 
 import typer
 from scipy.stats import norm
+from transformers.modeling_outputs import Seq2SeqLMOutput
 from typer_config import use_yaml_config
 import numpy as np
 import torch
@@ -48,15 +49,58 @@ from gluonts.transform import (
 from chronos import ChronosConfig, ChronosTokenizer
 
 import torch.nn as nn
+import torch.special as special
+
 from transformers import T5ForConditionalGeneration
 
 
 class T5ForMeanScale(T5ForConditionalGeneration):
-    def __init__(self, config):
+    def __init__(self, config, boundaries=None):
         super().__init__(config)
         # Additional layer to project the hidden states to mean and scale
         self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
+        if boundaries is not None:
+            self.register_buffer('boundaries', boundaries)
+        else:
+            self.boundaries = torch.zeros(4094, requires_grad=False)
+
         torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
+
+    def cg(self, mu, sigma, partition):
+        """Censored Gaussian using PyTorch.
+
+        In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
+        Out: a 1d tensor of length N + 1:
+        [
+            P(x < pt[0]),
+            P(pt[0] < x < pt[1]),
+             ...,
+            P(pt[N - 2] < x < pt[N - 1]),
+            P(pt[N - 1] < x)
+        ]
+        for x ~ normal(mu, sigma)
+        """
+
+        partition = torch.sort(partition).values
+        partition = partition.to(sigma.device)
+        torch_sqrt = torch.tensor(1.4142135623730951)
+        torch_sqrt = torch_sqrt.to(sigma.device)
+
+        # Calculate the cumulative distribution function values
+        cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
+
+        # Append 1 to the cdf values
+        # Note: cdf[i] == P(x < pt[i]), cdf[-1] == P(x < float('inf')) == 1
+        cdf = torch.cat([cdf, torch.tensor([1.0]).to(sigma.device)])
+
+        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
+        probs = cdf[1:] - cdf[:-1]
+
+        # Prepend P(x < pt[0]) to censored probs
+        init_prob = torch.tensor([cdf[0]], device=probs.device)
+        probs = torch.cat([init_prob, probs])
+
+        return probs
         
         
     def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
@@ -64,7 +108,6 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
                 use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
         # Get the standard outputs from the original T5 model
-        print(f"input_ids.shape:{input_ids.shape}")
         print(f"input_ids={input_ids},"
               f"\nattention_mask={attention_mask},"
               f"\ndecoder_input_ids={decoder_input_ids},"
@@ -79,22 +122,53 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                                   use_cache=use_cache, output_attentions=output_attentions,
                                   output_hidden_states=output_hidden_states, return_dict=return_dict)
 
-
         # Use the last hidden state of the decoder (outputs.last_hidden_state)
         hidden_states = outputs.logits
-        print(f"hidden_states.shape={hidden_states.shape}")
+        print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
 
+        hidden_shape = hidden_states.shape
         # Pass through the custom head to get mean and scale
         mean_scale = self.mean_scale_head(hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
 
         print(mean_scale.shape)
         mean = mean_scale[:, 0]
         scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
+        mean_scale_stacked = torch.stack((mean, scale), dim=-1)
 
-        return torch.stack((mean, scale), dim=-1), labels
+        #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
+        # those partition should be already sorted
+        partition = self.boundaries
+        print(f"partition.requires_grad={partition.requires_grad}")
 
-        # return outputs
+        # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
+        # outputs = outputs.transpose(0, 1)
+        probs = torch.stack([self.cg(output[0], output[1], partition) for output in mean_scale_stacked])
 
+        # clipped prob so that log prob wont be -inf
+        probs = torch.clamp(probs, min=1e-10, max=1.0 - 1e-10)
+
+        log_probs = probs  # Why this???
+        # log_probs = torch.log(probs)  # Why this???
+
+        # that model that we use say to ignore token -100,
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
+        # as far as i know it is even default version
+        loss = None
+
+        if labels is not None:
+            labels = super()._shift_right(labels)
+            nll_loss = nn.NLLLoss(ignore_index=-100)
+            loss = nll_loss(log_probs, labels.view(-1))
+            print(f"Loss:{loss}")
+
+        log_probs = log_probs.view(hidden_shape[0], hidden_shape[1], log_probs.shape[1])
+        if not return_dict:
+            return loss, log_probs
+
+        outputs["loss"] = loss
+        outputs["logits"] = log_probs
+        print()
+        return outputs
 
 app = typer.Typer(pretty_exceptions_enable=False)
 
@@ -209,6 +283,7 @@ def load_model(
     tie_embeddings=False,
     pad_token_id=0,
     eos_token_id=1,
+    boundaries=None,
 ):
     """
     Load the specified HuggingFace model, adjusting the vocabulary
@@ -222,14 +297,17 @@ def load_model(
         T5ForMeanScale if model_type == "seq2seq" else None
     )  # Load T5ForMeanScale for seq2seq model type
 
+    print(f"boundaries: {boundaries}")
+
     if random_init:
         print("Using random initialization")
         config = T5Config.from_pretrained(model_id)
+
         # Modify config as needed for T5ForMeanScale
         config.initializer_factor = 0.05
         config.tie_word_embeddings = tie_embeddings
 
-        model = AutoModelClass(config)
+        model = AutoModelClass(config, boundaries=boundaries)
     else:
         print(f"Using pretrained initialization from {model_id}")
         model = AutoModelClass.from_pretrained(model_id)
@@ -576,7 +654,7 @@ def main(
     tf32: bool = True,
     torch_compile: bool = True,
     tokenizer_class: str = "MeanScaleUniformBins",
-    tokenizer_kwargs: str = "{'low_limit': -15.0, 'high_limit': 15.0}",
+    tokenizer_kwargs: str = "{'low_limit': -1.0, 'high_limit': 1.0}",
     n_tokens: int = 4096,
     n_special_tokens: int = 2,
     pad_token_id: int = 0,
@@ -654,18 +732,6 @@ def main(
         for data_path in training_data_paths
     ]
 
-    log_on_main("Initializing model", logger)
-
-    model = load_model(
-        model_id=model_id,
-        model_type=model_type,
-        vocab_size=n_tokens,
-        random_init=random_init,
-        tie_embeddings=tie_embeddings,
-        pad_token_id=pad_token_id,
-        eos_token_id=eos_token_id,
-    )
-
     chronos_config = ChronosConfig(
         tokenizer_class=tokenizer_class,
         tokenizer_kwargs=tokenizer_kwargs,
@@ -683,9 +749,6 @@ def main(
         top_p=top_p,
     )
 
-    # Add extra items to model config so that it's saved in the ckpt
-    model.config.chronos_config = chronos_config.__dict__
-
     shuffled_train_dataset_old = ChronosDataset(
         datasets=train_datasets,
         probabilities=probability,
@@ -699,6 +762,23 @@ def main(
     )
 
     shuffled_train_dataset = shuffled_train_dataset_old.shuffle(shuffle_buffer_length=shuffle_buffer_length)
+
+    log_on_main("Initializing model", logger)
+
+    model = load_model(
+        model_id=model_id,
+        model_type=model_type,
+        vocab_size=n_tokens,
+        random_init=random_init,
+        tie_embeddings=tie_embeddings,
+        pad_token_id=pad_token_id,
+        eos_token_id=eos_token_id,
+        boundaries=shuffled_train_dataset_old.tokenizer.boundaries
+    )
+
+    # Add extra items to model config so that it's saved in the ckpt
+    model.config.chronos_config = chronos_config.__dict__
+
 
     # Define training args
     training_args = TrainingArguments(
@@ -723,45 +803,6 @@ def main(
         remove_unused_columns=False,
     )
 
-    import torch.special as special
-
-
-    def cg(mu, sigma, partition):
-        """Censored Gaussian using PyTorch.
-
-        In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
-        Out: a 1d tensor of length N + 1:
-        [
-            P(x < pt[0]),
-            P(pt[0] < x < pt[1]),
-             ...,
-            P(pt[N - 2] < x < pt[N - 1]),
-            P(pt[N - 1] < x)
-        ]
-        for x ~ normal(mu, sigma)
-        """
-
-        partition = torch.sort(partition).values
-        partition = partition.to(sigma.device)
-        torch_sqrt = torch.tensor(1.4142135623730951)
-        torch_sqrt = torch_sqrt.to(sigma.device)
-
-        # Calculate the cumulative distribution function values
-        cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
-
-        # Append 1 to the cdf values
-        # Note: cdf[i] == P(x < pt[i]), cdf[-1] == P(x < float('inf')) == 1
-        cdf = torch.cat([cdf, torch.tensor([1.0]).to(sigma.device)])
-
-        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
-        probs = cdf[1:] - cdf[:-1]
-
-        # Prepend P(x < pt[0]) to censored probs
-        init_prob = torch.tensor([cdf[0]], device=probs.device)
-        probs = torch.cat([init_prob, probs])
-
-        return probs
-
 
     class CustomTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
@@ -774,35 +815,17 @@ def main(
             # else:
             #     labels = None
             outputs = model(**inputs)
-            outputs, labels = outputs[0], outputs[1]
-            print(f"outputs={outputs.shape}")
-            print(f"labels={labels.shape}")
 
-            #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
-            # those partition should be already sorted
-            partition = shuffled_train_dataset_old.tokenizer.boundaries
+            if isinstance(outputs, dict):
 
-            # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
-            # outputs = outputs.transpose(0, 1)
-            probs = torch.stack([cg(output[0], output[1], partition) for output in outputs])
-            
-            # clipped prob so that log prob wont be -inf
-            probs = torch.clamp(probs, min=1e-10, max=1.0 - 1e-10)
+                loss = outputs["loss"]
+                logits = outputs["logits"]
+            else:
+                loss, logits = outputs[0], outputs[1]
 
-            log_probs = torch.log(probs)
-            
-            print(probs.shape)
-            
-            # that model that we use say to ignore token -100,
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
-            # as far as i know it is even default version 
-            nll_loss = nn.NLLLoss(ignore_index=-100)
-            loss = nll_loss(log_probs, labels.view(-1))
+            return (loss, logits) if return_outputs else loss
 
-            # as in standard compute_loss
-            return (loss, outputs) if return_outputs else loss
-
-
+    # original_boundaries = deepcopy(shuffled_train_dataset_old.tokenizer.boundaries)
     # Create Trainer instance
     trainer = CustomTrainer(
         model=model,
@@ -812,6 +835,18 @@ def main(
     log_on_main("Training", logger)
 
     trainer.train()
+
+    trained_boundaries = model.boundaries
+    # print(original_boundaries)
+    print(trained_boundaries)
+    # Calculate the difference
+    # difference = original_boundaries - trained_boundaries
+
+    # Sum the elements of the difference
+    # sum_difference = torch.sum(difference)
+
+    # Print the sum of the difference
+    # print("Sum of the differences between tensors:", sum_difference.item())
 
     if is_main_process():
         model.save_pretrained(output_dir / "checkpoint-final")
