@@ -147,8 +147,7 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         # clipped prob so that log prob wont be -inf
         probs = torch.clamp(probs, min=1e-10, max=1.0 - 1e-10)
 
-        log_probs = probs  # Why this???
-        # log_probs = torch.log(probs)  # Why this???
+        # log_probs = probs
 
         # that model that we use say to ignore token -100,
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
@@ -157,16 +156,17 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         if labels is not None:
             labels = super()._shift_right(labels)
+            log_probs = torch.log(probs)  # Why this???
             nll_loss = nn.NLLLoss(ignore_index=-100)
             loss = nll_loss(log_probs, labels.view(-1))
             print(f"Loss:{loss}")
 
-        log_probs = log_probs.view(hidden_shape[0], hidden_shape[1], log_probs.shape[1])
+        probs = probs.view(hidden_shape[0], hidden_shape[1], probs.shape[1])
         if not return_dict:
-            return loss, log_probs
+            return loss, probs
 
         outputs["loss"] = loss
-        outputs["logits"] = log_probs
+        outputs["logits"] = probs
         print()
         return outputs
 
@@ -654,7 +654,7 @@ def main(
     tf32: bool = True,
     torch_compile: bool = True,
     tokenizer_class: str = "MeanScaleUniformBins",
-    tokenizer_kwargs: str = "{'low_limit': -1.0, 'high_limit': 1.0}",
+    tokenizer_kwargs: str = "{'low_limit': -15.0, 'high_limit': 15.0}",
     n_tokens: int = 4096,
     n_special_tokens: int = 2,
     pad_token_id: int = 0,
