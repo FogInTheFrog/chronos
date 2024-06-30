@@ -1,0 +1,2 @@
+dataset,model,MASE,WQL
+monash_traffic,/home/jzacharczuk/studia/nlp/chronos-forecasting/scripts/training/output/run-85/checkpoint-final,71.08462014586793,22.479210941082997
