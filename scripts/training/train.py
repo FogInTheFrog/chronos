@@ -499,6 +499,16 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
                 yield self.to_hf_format(entry)
 
 
+
+from transformers import TrainerCallback
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+import os
+
+class PrintLossCallback(TrainerCallback):
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if state.is_local_process_zero and 'loss' in logs:
+            print(f"Step: {state.global_step}, Loss: {logs['loss']}")
+
 @app.command()
 @use_yaml_config(param_name="config")
 def main(
@@ -668,11 +678,13 @@ def main(
         remove_unused_columns=False,
     )
 
+
     # Create Trainer instance
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=shuffled_train_dataset,
+        callbacks=[PrintLossCallback()]
     )
     log_on_main("Training", logger)
 
