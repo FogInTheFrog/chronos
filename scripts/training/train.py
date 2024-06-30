@@ -94,8 +94,10 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         # Prepend P(x = special token 0) and P(x = special token 1)
         # TODO: make this config-dependent
-        special_token_probs = torch.tensor([0, 0], device=probs.device)
+        print(f"{probs.shape=}")
+        special_token_probs = torch.tensor([0, 0, 0], device=probs.device)
         probs = torch.cat([special_token_probs, probs])
+        print(f"{probs.shape=}")
 
         return probs
         

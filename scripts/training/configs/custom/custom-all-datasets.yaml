@@ -1,5 +1,3 @@
-training_data_paths:
-- "/home/elan/chronos/datasets/brazilian_cities_temperature.arrow
 - "/home/elan/chronos/datasets/mexico_city_bikes.arrow"
 - "/home/elan/chronos/datasets/taxi.arrow"
 probability:
