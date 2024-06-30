@@ -59,13 +59,22 @@ class T5ForMeanScale(T5ForConditionalGeneration):
     def __init__(self, config, boundaries=None):
         super().__init__(config)
         # Additional layer to project the hidden states to mean and scale
-        self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
+        self.mean_scale_head = nn.Sequential(
+            nn.Linear(4096, 128),
+            nn.ReLU(),
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Linear(32, 2)
+        )
+        # Output two values: mean and scale
         if boundaries is not None:
             self.register_buffer('boundaries', boundaries)
         else:
             self.boundaries = torch.zeros(4094, requires_grad=False)
 
-        torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head[0].weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head[2].weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head[4].weight)
 
     def cg(self, mu, sigma, partition):
         """Censored Gaussian using PyTorch.
