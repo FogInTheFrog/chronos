@@ -1,8 +1,7 @@
+training_data_paths:
 - "/home/elan/chronos/datasets/mydata500series.arrow"
-- "/home/elan/chronos/datasets/taxi-2.arrow"
 probability:
-- 0.2
-- 0.8
+- 1.0
 context_length: 512
 prediction_length: 64
 min_past: 60

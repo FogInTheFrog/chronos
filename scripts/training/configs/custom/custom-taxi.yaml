@@ -16,7 +16,7 @@ shuffle_buffer_length: 5_000
 gradient_accumulation_steps: 1
 model_id: google/t5-efficient-tiny
 model_type: seq2seq
-random_init: false
+random_init: true
 tie_embeddings: true
 output_dir: ./output/
 tf32: true

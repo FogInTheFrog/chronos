@@ -120,10 +120,12 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                                   output_hidden_states=output_hidden_states, return_dict=return_dict)
 
         # Use the last hidden state of the decoder (outputs.last_hidden_state)
+
         hidden_states = outputs.logits
         print(f"{hidden_states.sum()=}")
         print(f"{hidden_states.max()=}")
         print(f"{hidden_states.min()=}")
+        print(f"{torch.isfinite(hidden_states).sum()=}")
         # print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
 
         hidden_shape = hidden_states.shape
@@ -138,7 +140,9 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
         # those partition should be already sorted
         partition = self.boundaries
-        print(f"{partition=}")
+        print(f"{partition.sum()=}")
+        print(f"{partition.max()=}")
+        print(f"{partition.min()=}")
         print(f"{mean_scale_stacked[0][0]=}")
         print(f"{mean_scale_stacked[0][1]=}")
         # print(f"partition.requires_grad={partition.requires_grad}")
@@ -146,7 +150,7 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
         # outputs = outputs.transpose(0, 1)
         probs = torch.stack([self.cg(output[0], output[1], partition) for output in mean_scale_stacked])
-        probs = torch.clamp(probs, 0, 1) # ie not clamping probs
+        probs = torch.clamp(probs, 1e-16, 1 - 1e-16) # ie not clamping probs
         log_probs = torch.log(probs)
         # logfinite_mask = torch.isfinite(log_probs)
         # print(f"{probs[logfinite_mask].shape=}")
@@ -164,9 +168,15 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         loss = None
 
         if labels is not None:
-            labels = super()._shift_right(labels)
+            # labels = super()._shift_right(labels)
             print(f"{torch.max(labels)=}")
-            nll_loss = nn.NLLLoss(ignore_index=-100)
+            nll_loss = nn.NLLLoss(ignore_index=-100, reduction="sum")
+            print(f"{log_probs.isnan().sum()=}")
+            print(f"{labels.isnan().sum()=}")
+            print(f"{log_probs.min()=}")
+            print(f"{log_probs.max()=}")
+            print(f"{log_probs.size()=}")
+            print(f"{labels.size()=}")
             loss = nll_loss(log_probs, labels.view(-1))
             print(f"{loss=}")
 
