@@ -53,142 +53,6 @@ import torch.special as special
 
 from transformers import T5ForConditionalGeneration
 
-
-class T5ForMeanScale(T5ForConditionalGeneration):
-    def __init__(self, config, boundaries=None):
-        super().__init__(config)
-        # Additional layer to project the hidden states to mean and scale
-        self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
-        if boundaries is not None:
-            self.register_buffer('boundaries', boundaries)
-        else:
-            self.boundaries = torch.zeros(4094, requires_grad=False)
-
-        torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
-
-    def cg(self, mu, sigma, partition):
-        """Censored Gaussian using PyTorch.
-
-        In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
-        Out: a 1d tensor of length N - 1:
-        [
-            P(pt[0] < x < pt[1]),
-             ...,
-            P(pt[N - 2] < x < pt[N - 1]),
-        ]
-        for x ~ normal(mu, sigma)
-        """
-
-        partition = torch.sort(partition).values
-        partition = partition.to(sigma.device)
-        torch_sqrt = torch.tensor(1.4142135623730951)
-        torch_sqrt = torch_sqrt.to(sigma.device)
-
-        # Calculate the cumulative distribution function values
-        cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
-
-        # Append 1 to the cdf values
-
-        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
-        probs = cdf[1:] - cdf[:-1]
-
-        # Prepend P(x = special token 0) and P(x = special token 1)
-        # TODO: make this config-dependent
-        special_token_probs = torch.tensor([0, 0, 0], device=probs.device)
-        probs = torch.cat([special_token_probs, probs])
-
-        return probs
-        
-        
-    def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
-                head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
-                past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
-                use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
-        # Get the standard outputs from the original T5 model
-        # print(f"input_ids={input_ids},"
-        #       f"\nattention_mask={attention_mask},"
-        #       f"\ndecoder_input_ids={decoder_input_ids},"
-        #       f"\ndecoder_attention_mask={decoder_attention_mask},"
-        #       f"\ndecoder_inputs_embeds={decoder_inputs_embeds}")
-        outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask,
-                                  decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
-                                  head_mask=head_mask, decoder_head_mask=decoder_head_mask,
-                                  cross_attn_head_mask=cross_attn_head_mask, encoder_outputs=encoder_outputs,
-                                  past_key_values=past_key_values, inputs_embeds=inputs_embeds,
-                                  decoder_inputs_embeds=decoder_inputs_embeds, labels=labels,
-                                  use_cache=use_cache, output_attentions=output_attentions,
-                                  output_hidden_states=output_hidden_states, return_dict=return_dict)
-
-        # Use the last hidden state of the decoder (outputs.last_hidden_state)
-
-        hidden_states = outputs.logits
-        print(f"{hidden_states.sum()=}")
-        print(f"{hidden_states.max()=}")
-        print(f"{hidden_states.min()=}")
-        print(f"{torch.isfinite(hidden_states).sum()=}")
-        # print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
-
-        hidden_shape = hidden_states.shape
-        # Pass through the custom head to get mean and scale
-        mean_scale = self.mean_scale_head(hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
-
-        # print(mean_scale.shape)
-        mean = mean_scale[:, 0]
-        scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
-        mean_scale_stacked = torch.stack((mean, scale), dim=-1)
-
-        #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
-        # those partition should be already sorted
-        partition = self.boundaries
-        print(f"{partition.sum()=}")
-        print(f"{partition.max()=}")
-        print(f"{partition.min()=}")
-        print(f"{mean_scale_stacked[0][0]=}")
-        print(f"{mean_scale_stacked[0][1]=}")
-        # print(f"partition.requires_grad={partition.requires_grad}")
-
-        # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
-        # outputs = outputs.transpose(0, 1)
-        probs = torch.stack([self.cg(output[0], output[1], partition) for output in mean_scale_stacked])
-        probs = torch.clamp(probs, 1e-16, 1 - 1e-16) # ie not clamping probs
-        log_probs = torch.log(probs)
-        # logfinite_mask = torch.isfinite(log_probs)
-        # print(f"{probs[logfinite_mask].shape=}")
-        # min_logfinite = torch.min(probs[logfinite_mask])
-        # min_global = 100*min_logfinite
-        # log_probs[~logfinite_mask] = min_global
-
-
-
-        # log_probs = probs
-
-        # that model that we use say to ignore token -100,
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
-        # as far as i know it is even default version
-        loss = None
-
-        if labels is not None:
-            # labels = super()._shift_right(labels)
-            print(f"{torch.max(labels)=}")
-            nll_loss = nn.NLLLoss(ignore_index=-100, reduction="sum")
-            print(f"{log_probs.isnan().sum()=}")
-            print(f"{labels.isnan().sum()=}")
-            print(f"{log_probs.min()=}")
-            print(f"{log_probs.max()=}")
-            print(f"{log_probs.size()=}")
-            print(f"{labels.size()=}")
-            loss = nll_loss(log_probs, labels.view(-1))
-            print(f"{loss=}")
-
-        probs = probs.view(hidden_shape[0], hidden_shape[1], probs.shape[1])
-        if not return_dict:
-            return loss, probs
-
-        outputs["loss"] = loss
-        outputs["logits"] = probs
-        print()
-        return outputs
-
 app = typer.Typer(pretty_exceptions_enable=False)
 
 
@@ -313,7 +177,7 @@ def load_model(
     """
     assert model_type in ["seq2seq", "causal"]
     AutoModelClass = (
-        T5ForMeanScale if model_type == "seq2seq" else None
+        AutoModelForSeq2SeqLM if model_type == "seq2seq" else None
     )  # Load T5ForMeanScale for seq2seq model type
 
     print(f"boundaries: {boundaries}")
@@ -326,7 +190,7 @@ def load_model(
         config.initializer_factor = 0.05
         config.tie_word_embeddings = tie_embeddings
 
-        model = AutoModelClass(config, boundaries=boundaries)
+        model = AutoModelClass(config)
     else:
         print(f"Using pretrained initialization from {model_id}")
         model = AutoModelClass.from_pretrained(model_id)
@@ -645,8 +509,8 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
             for entry in itertools.chain(*iterators):
                 yield self.to_hf_format(entry)
                 
-                
-                
+
+
 
 
 @app.command()
@@ -824,25 +688,14 @@ def main(
 
 
     class CustomTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
+        def training_step(self, model, inputs):
+            # Call the original training step to get the loss
+            loss = super().training_step(model, inputs)
 
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/trainer.py#L3328
-            # as in standard compute_loss
-            # super().compute_loss(self, model, inputs)
-            # if self.label_smoother is not None and "labels" in inputs:
-            #     labels = inputs.pop("labels")
-            # else:
-            #     labels = None
-            outputs = model(**inputs)
+            # Print the loss
+            print(f"Training loss: {loss}")
 
-            if isinstance(outputs, dict):
-
-                loss = outputs["loss"]
-                logits = outputs["logits"]
-            else:
-                loss, logits = outputs[0], outputs[1]
-
-            return (loss, logits) if return_outputs else loss
+            return loss
 
     # original_boundaries = deepcopy(shuffled_train_dataset_old.tokenizer.boundaries)
     # Create Trainer instance
@@ -855,7 +708,7 @@ def main(
 
     trainer.train()
 
-    trained_boundaries = model.boundaries
+    # trained_boundaries = model.boundaries
     # print(original_boundaries)
     # print(trained_boundaries)
     # Calculate the difference
