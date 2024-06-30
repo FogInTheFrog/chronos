@@ -3,6 +3,7 @@
 
 import ast
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import sys
@@ -122,10 +123,10 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         # Use the last hidden state of the decoder (outputs.last_hidden_state)
 
         hidden_states = outputs.logits
-        print(f"{hidden_states.sum()=}")
-        print(f"{hidden_states.max()=}")
-        print(f"{hidden_states.min()=}")
-        print(f"{torch.isfinite(hidden_states).sum()=}")
+        # print(f"{hidden_states.sum()=}")
+        # print(f"{hidden_states.max()=}")
+        # print(f"{hidden_states.min()=}")
+        # print(f"{torch.isfinite(hidden_states).sum()=}")
         # print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
 
         hidden_shape = hidden_states.shape
@@ -140,11 +141,11 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
         # those partition should be already sorted
         partition = self.boundaries
-        print(f"{partition.sum()=}")
-        print(f"{partition.max()=}")
-        print(f"{partition.min()=}")
-        print(f"{mean_scale_stacked[0][0]=}")
-        print(f"{mean_scale_stacked[0][1]=}")
+        # print(f"{partition.sum()=}")
+        # print(f"{partition.max()=}")
+        # print(f"{partition.min()=}")
+        # print(f"{mean_scale_stacked[0][0]=}")
+        # print(f"{mean_scale_stacked[0][1]=}")
         # print(f"partition.requires_grad={partition.requires_grad}")
 
         # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
@@ -169,16 +170,16 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         if labels is not None:
             # labels = super()._shift_right(labels)
-            print(f"{torch.max(labels)=}")
+            # print(f"{torch.max(labels)=}")
             nll_loss = nn.NLLLoss(ignore_index=-100, reduction="sum")
-            print(f"{log_probs.isnan().sum()=}")
-            print(f"{labels.isnan().sum()=}")
-            print(f"{log_probs.min()=}")
-            print(f"{log_probs.max()=}")
-            print(f"{log_probs.size()=}")
-            print(f"{labels.size()=}")
+            # print(f"{log_probs.isnan().sum()=}")
+            # print(f"{labels.isnan().sum()=}")
+            # print(f"{log_probs.min()=}")
+            # print(f"{log_probs.max()=}")
+            # print(f"{log_probs.size()=}")
+            # print(f"{labels.size()=}")
             loss = nll_loss(log_probs, labels.view(-1))
-            print(f"{loss=}")
+            print(f"{loss.item()=}")
 
         probs = probs.view(hidden_shape[0], hidden_shape[1], probs.shape[1])
         if not return_dict:
@@ -877,5 +878,11 @@ def main(
 if __name__ == "__main__":
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     logger = logging.getLogger(__file__)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
+
+    file_handler = RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+
+    # Add file handler to logger
+    logger.addHandler(file_handler)
     app()
