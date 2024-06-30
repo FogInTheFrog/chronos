@@ -33,7 +33,7 @@ max_steps: 10_000
 save_steps: 1_000
 log_steps: 1
 per_device_train_batch_size: 32 #32
-learning_rate: 0.0001
+learning_rate: 0.0005
 optim: adamw_torch_fused
 num_samples: 20
 shuffle_buffer_length: 5_000

@@ -59,24 +59,40 @@ class T5ForMeanScale(T5ForConditionalGeneration):
     def __init__(self, config, boundaries=None):
         super().__init__(config)
         # Additional layer to project the hidden states to mean and scale
-        self.mean_scale_head = nn.Sequential(
-            nn.Linear(4096, 128),
-            nn.ReLU(),
-            nn.Linear(128, 32),
-            nn.ReLU(),
-            nn.Linear(32, 2)
-        )
-        # Output two values: mean and scale
-        if boundaries is not None:
-            self.register_buffer('boundaries', boundaries)
-        else:
-            self.boundaries = torch.zeros(4094, requires_grad=False)
+        self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
+        self.register_buffer('boundaries', boundaries)
+        # else:
+        #    self.boundaries = torch.zeros(4094, requires_grad=False).to(torch.device("cuda"))
+        self.init_probs = torch.tensor([0, 0, 0]).to(torch.device("cuda"))
 
-        torch.nn.init.xavier_uniform_(self.mean_scale_head[0].weight)
-        torch.nn.init.xavier_uniform_(self.mean_scale_head[2].weight)
-        torch.nn.init.xavier_uniform_(self.mean_scale_head[4].weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
 
-    def cg(self, mu, sigma, partition):
+    def cg_vectorized(self, mu, sigma):
+        """Vectorized Censored Gaussian using PyTorch.
+
+        In: mu, sigma, 2D tensors of shape (batch_size, 1)
+        Out: a 2D tensor of shape (batch_size, N)
+        where N is the number of probability bins
+        """
+        # Expand boundaries to match batch size
+        expanded_boundaries = self.boundaries.unsqueeze(0).expand(mu.size(0), -1)
+
+        # Calculate the cumulative distribution function values
+        cdf = 0.5 * (1 + torch.erf((expanded_boundaries - mu.unsqueeze(1)) / (sigma.unsqueeze(1) * torch.sqrt(
+            torch.tensor(2).to(
+                torch.device("cuda")
+            )
+        ))))
+
+        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
+        probs = cdf[:, 1:] - cdf[:, :-1]
+
+        # Prepend P(x = special token 0) and P(x = special token 1)
+        probs = torch.cat([self.init_probs.expand(mu.size(0), -1), probs], dim=1)
+
+        return probs
+
+    def cg(self, mu, sigma):
         """Censored Gaussian using PyTorch.
 
         In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
@@ -89,13 +105,8 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         for x ~ normal(mu, sigma)
         """
 
-        partition = torch.sort(partition).values
-        partition = partition.to(sigma.device)
-        torch_sqrt = torch.tensor(1.4142135623730951)
-        torch_sqrt = torch_sqrt.to(sigma.device)
-
         # Calculate the cumulative distribution function values
-        cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
+        cdf = 0.5 * (1 + special.erf((self.boundaries - mu) / (sigma * torch.sqrt(torch.tensor(2).to(sigma.device)))))
 
         # Append 1 to the cdf values
 
@@ -104,12 +115,10 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         # Prepend P(x = special token 0) and P(x = special token 1)
         # TODO: make this config-dependent
-        special_token_probs = torch.tensor([0, 0, 0], device=probs.device)
-        probs = torch.cat([special_token_probs, probs])
+        probs = torch.cat([self.init_probs, probs])
 
         return probs
-        
-        
+
     def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
                 head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
@@ -140,16 +149,16 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         hidden_shape = hidden_states.shape
         # Pass through the custom head to get mean and scale
-        mean_scale = self.mean_scale_head(hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
+        mean_scale = self.mean_scale_head(
+            hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
 
         # print(mean_scale.shape)
         mean = mean_scale[:, 0]
         scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
-        mean_scale_stacked = torch.stack((mean, scale), dim=-1)
+        # mean_scale_stacked = torch.stack((mean, scale), dim=-1)
 
         #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
         # those partition should be already sorted
-        partition = self.boundaries
         # print(f"{partition.sum()=}")
         # print(f"{partition.max()=}")
         # print(f"{partition.min()=}")
@@ -159,16 +168,15 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
         # outputs = outputs.transpose(0, 1)
-        probs = torch.stack([self.cg(output[0], output[1], partition) for output in mean_scale_stacked])
-        probs = torch.clamp(probs, 1e-16, 1 - 1e-16) # ie not clamping probs
+        probs = self.cg_vectorized(mean, scale)
+        # probs = torch.stack([self.cg_vectorized(output[0], output[1]) for output in mean_scale_stacked])
+        probs = torch.clamp(probs, 1e-16, 1 - 1e-16)  # ie not clamping probs
         log_probs = torch.log(probs)
         # logfinite_mask = torch.isfinite(log_probs)
         # print(f"{probs[logfinite_mask].shape=}")
         # min_logfinite = torch.min(probs[logfinite_mask])
         # min_global = 100*min_logfinite
         # log_probs[~logfinite_mask] = min_global
-
-
 
         # log_probs = probs
 
@@ -180,7 +188,7 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         if labels is not None:
             # labels = super()._shift_right(labels)
             # print(f"{torch.max(labels)=}")
-            nll_loss = nn.NLLLoss(ignore_index=-100, reduction="sum")
+            nll_loss = nn.NLLLoss(ignore_index=-100, reduction="mean")
             # print(f"{log_probs.isnan().sum()=}")
             # print(f"{labels.isnan().sum()=}")
             # print(f"{log_probs.min()=}")
@@ -198,6 +206,7 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         outputs["logits"] = probs
         print()
         return outputs
+
 
 app = typer.Typer(pretty_exceptions_enable=False)
 
@@ -270,10 +279,10 @@ def save_training_info(ckpt_path: Path, training_config: Dict):
 
 
 def get_next_path(
-    base_fname: str,
-    base_dir: Path,
-    file_type: str = "yaml",
-    separator: str = "-",
+        base_fname: str,
+        base_dir: Path,
+        file_type: str = "yaml",
+        separator: str = "-",
 ):
     """
     Gets the next available path in a directory. For example, if `base_fname="results"`
@@ -305,14 +314,14 @@ def get_next_path(
 
 
 def load_model(
-    model_id="google/t5-efficient-tiny",
-    model_type="seq2seq",
-    vocab_size=4096,
-    random_init=False,
-    tie_embeddings=False,
-    pad_token_id=0,
-    eos_token_id=1,
-    boundaries=None,
+        model_id="google/t5-efficient-tiny",
+        model_type="seq2seq",
+        vocab_size=4096,
+        random_init=False,
+        tie_embeddings=False,
+        pad_token_id=0,
+        eos_token_id=1,
+        boundaries=None,
 ):
     """
     Load the specified HuggingFace model, adjusting the vocabulary
@@ -350,7 +359,7 @@ def load_model(
 
 
 def has_enough_observations(
-    entry: dict, min_length: int = 0, max_missing_prop: float = 1.0
+        entry: dict, min_length: int = 0, max_missing_prop: float = 1.0
 ) -> bool:
     """
     Check if the given entry has enough observations in the ``"target"`` attribute.
@@ -366,8 +375,8 @@ def has_enough_observations(
         attribute.
     """
     if (
-        len(entry["target"]) >= min_length
-        and np.isnan(entry["target"]).mean() <= max_missing_prop
+            len(entry["target"]) >= min_length
+            and np.isnan(entry["target"]).mean() <= max_missing_prop
     ):
         return True
     return False
@@ -453,18 +462,18 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
     """
 
     def __init__(
-        self,
-        datasets: list,
-        probabilities: List[float],
-        tokenizer: ChronosTokenizer,
-        context_length: int = 512,
-        prediction_length: int = 64,
-        drop_prob: float = 0.2,
-        min_past: Optional[int] = None,
-        model_type: str = "seq2seq",
-        imputation_method: Optional[MissingValueImputation] = None,
-        mode: str = "training",
-        np_dtype=np.float32,
+            self,
+            datasets: list,
+            probabilities: List[float],
+            tokenizer: ChronosTokenizer,
+            context_length: int = 512,
+            prediction_length: int = 64,
+            drop_prob: float = 0.2,
+            min_past: Optional[int] = None,
+            model_type: str = "seq2seq",
+            imputation_method: Optional[MissingValueImputation] = None,
+            mode: str = "training",
+            np_dtype=np.float32,
     ) -> None:
         super().__init__()
 
@@ -654,53 +663,50 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         else:
             for entry in itertools.chain(*iterators):
                 yield self.to_hf_format(entry)
-                
-                
-                
 
 
 @app.command()
 @use_yaml_config(param_name="config")
 def main(
-    training_data_paths: str,
-    probability: Optional[str] = None,
-    context_length: int = 512,
-    prediction_length: int = 64,
-    min_past: int = 64,
-    max_steps: int = 200_000,
-    save_steps: int = 50_000,
-    log_steps: int = 500,
-    per_device_train_batch_size: int = 32,
-    learning_rate: float = 1e-3,
-    optim: str = "adamw_torch_fused",
-    shuffle_buffer_length: int = 100,
-    gradient_accumulation_steps: int = 2,
-    model_id: str = "google/t5-efficient-tiny",
-    model_type: str = "seq2seq",
-    random_init: bool = False,
-    tie_embeddings: bool = False,
-    output_dir: str = "./output/",
-    tf32: bool = True,
-    torch_compile: bool = True,
-    tokenizer_class: str = "MeanScaleUniformBins",
-    tokenizer_kwargs: str = "{'low_limit': -15.0, 'high_limit': 15.0}",
-    n_tokens: int = 4096,
-    n_special_tokens: int = 2,
-    pad_token_id: int = 0,
-    eos_token_id: int = 1,
-    use_eos_token: bool = True,
-    lr_scheduler_type: str = "linear",
-    warmup_ratio: float = 0.0,
-    dataloader_num_workers: int = 1,
-    max_missing_prop: float = 0.9,
-    num_samples: int = 20,
-    temperature: float = 1.0,
-    top_k: int = 50,
-    top_p: float = 1.0,
-    seed: Optional[int] = None,
+        training_data_paths: str,
+        probability: Optional[str] = None,
+        context_length: int = 512,
+        prediction_length: int = 64,
+        min_past: int = 64,
+        max_steps: int = 200_000,
+        save_steps: int = 50_000,
+        log_steps: int = 500,
+        per_device_train_batch_size: int = 32,
+        learning_rate: float = 1e-3,
+        optim: str = "adamw_torch_fused",
+        shuffle_buffer_length: int = 100,
+        gradient_accumulation_steps: int = 2,
+        model_id: str = "google/t5-efficient-tiny",
+        model_type: str = "seq2seq",
+        random_init: bool = False,
+        tie_embeddings: bool = False,
+        output_dir: str = "./output/",
+        tf32: bool = True,
+        torch_compile: bool = True,
+        tokenizer_class: str = "MeanScaleUniformBins",
+        tokenizer_kwargs: str = "{'low_limit': -15.0, 'high_limit': 15.0}",
+        n_tokens: int = 4096,
+        n_special_tokens: int = 2,
+        pad_token_id: int = 0,
+        eos_token_id: int = 1,
+        use_eos_token: bool = True,
+        lr_scheduler_type: str = "linear",
+        warmup_ratio: float = 0.0,
+        dataloader_num_workers: int = 1,
+        max_missing_prop: float = 0.9,
+        num_samples: int = 20,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        seed: Optional[int] = None,
 ):
     if tf32 and not (
-        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+            torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
     ):
         # TF32 floating point format is available only on NVIDIA GPUs
         # with compute capability 8 and above. See link for details.
@@ -713,7 +719,7 @@ def main(
         tf32 = False
 
     if seed is None:
-        seed = random.randint(0, 2**32)
+        seed = random.randint(0, 2 ** 32)
 
     log_on_main(f"Using SEED: {seed}", logger)
     transformers.set_seed(seed=seed)
@@ -808,7 +814,6 @@ def main(
     # Add extra items to model config so that it's saved in the ckpt
     model.config.chronos_config = chronos_config.__dict__
 
-
     # Define training args
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -831,7 +836,6 @@ def main(
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
     )
-
 
     class CustomTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
