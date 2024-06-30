@@ -190,7 +190,7 @@ def load_model(
         config.initializer_factor = 0.05
         config.tie_word_embeddings = tie_embeddings
 
-        model = AutoModelClass(config)
+        model = AutoModelClass.from_config(config)
     else:
         print(f"Using pretrained initialization from {model_id}")
         model = AutoModelClass.from_pretrained(model_id)
