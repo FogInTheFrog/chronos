@@ -141,11 +141,9 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                                   use_cache=use_cache, output_attentions=output_attentions,
                                   output_hidden_states=output_hidden_states, return_dict=return_dict)
 
-        # Use the last hidden state of the decoder (outputs.logits)
+        # Use the last state of the decoder (outputs.logits)
         t5_logits = outputs.logits
 
-        # print(f"{t5_logits=}")
-        # print(f"{t5_logits.shape=}")
         hidden_shape = t5_logits.shape
         # Pass through the custom head to get mean and scale
         mean_scale = self.mean_scale_head(
@@ -154,46 +152,18 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         # print(mean_scale.shape)
         mean = mean_scale[:, 0]
         scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
-        # mean_scale_stacked = torch.stack((mean, scale), dim=-1)
 
-        #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
-        # those partition should be already sorted
-        # print(f"{partition.sum()=}")
-        # print(f"{partition.max()=}")
-        # print(f"{partition.min()=}")
-        # print(f"{mean_scale_stacked[0][0]=}")
-        # print(f"{mean_scale_stacked[0][1]=}")
-        # print(f"partition.requires_grad={partition.requires_grad}")
-
-        # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
-        # outputs = outputs.transpose(0, 1)
         probs = self.cg_vectorized(mean, scale)
-        # probs = torch.stack([self.cg_vectorized(output[0], output[1]) for output in mean_scale_stacked])
         probs = torch.clamp(probs, 1e-16, 1 - 1e-16)  # ie not clamping probs
         log_probs = torch.log(probs)
-        # logfinite_mask = torch.isfinite(log_probs)
-        # print(f"{probs[logfinite_mask].shape=}")
-        # min_logfinite = torch.min(probs[logfinite_mask])
-        # min_global = 100*min_logfinite
-        # log_probs[~logfinite_mask] = min_global
 
-        # log_probs = probs
 
         # that model that we use say to ignore token -100,
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
-        # as far as i know it is even default version
         loss = None
 
         if labels is not None:
-            # labels = super()._shift_right(labels)
-            # print(f"{torch.max(labels)=}")
             nll_loss = nn.NLLLoss(ignore_index=-100, reduction="mean")
-            # print(f"{log_probs.isnan().sum()=}")
-            # print(f"{labels.isnan().sum()=}")
-            # print(f"{log_probs.min()=}")
-            # print(f"{log_probs.max()=}")
-            # print(f"{log_probs.size()=}")
-            # print(f"{labels.size()=}")
             loss = nll_loss(log_probs, labels.view(-1))
             print(f"{loss.item()=}")
 
@@ -203,7 +173,6 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         outputs["loss"] = loss
         outputs["logits"] = probs
-        print()
         return outputs
 
 
