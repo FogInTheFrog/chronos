@@ -880,7 +880,7 @@ if __name__ == "__main__":
     logger = logging.getLogger(__file__)
     logger.setLevel(logging.DEBUG)
 
-    file_handler = RotatingFileHandler('app.log', maxBytes=1024 * 1024, backupCount=5)
+    file_handler = RotatingFileHandler('app_entire_training.log', maxBytes=1024 * 1024, backupCount=5)
     file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
 
     # Add file handler to logger
