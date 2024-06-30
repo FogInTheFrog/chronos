@@ -73,7 +73,9 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         self.init_probs = torch.tensor([0, 0, 0]).to(torch.device("cuda"))
 
-        torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head[0].weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head[2].weight)
+        torch.nn.init.xavier_uniform_(self.mean_scale_head[4].weight)
 
     def cg_vectorized(self, mu, sigma):
         """Vectorized Censored Gaussian using PyTorch.
