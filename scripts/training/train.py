@@ -59,10 +59,18 @@ class T5ForMeanScale(T5ForConditionalGeneration):
     def __init__(self, config, boundaries=None):
         super().__init__(config)
         # Additional layer to project the hidden states to mean and scale
-        self.mean_scale_head = nn.Linear(4096, 2)  # Output two values: mean and scale
-        self.register_buffer('boundaries', boundaries)
-        # else:
-        #    self.boundaries = torch.zeros(4094, requires_grad=False).to(torch.device("cuda"))
+        self.mean_scale_head = nn.Sequential(
+            nn.Linear(4096, 128),
+            nn.ReLU(),
+            nn.Linear(128, 16),
+            nn.ReLU(),
+            nn.Linear(16, 2)
+        )# Output two values: mean and scale
+        if boundaries is None:
+           self.boundaries = torch.zeros(4094, requires_grad=False).to(torch.device("cuda"))
+        else:
+            self.register_buffer('boundaries', boundaries)
+
         self.init_probs = torch.tensor([0, 0, 0]).to(torch.device("cuda"))
 
         torch.nn.init.xavier_uniform_(self.mean_scale_head.weight)
@@ -108,13 +116,10 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         # Calculate the cumulative distribution function values
         cdf = 0.5 * (1 + special.erf((self.boundaries - mu) / (sigma * torch.sqrt(torch.tensor(2).to(sigma.device)))))
 
-        # Append 1 to the cdf values
-
         # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
         probs = cdf[1:] - cdf[:-1]
 
         # Prepend P(x = special token 0) and P(x = special token 1)
-        # TODO: make this config-dependent
         probs = torch.cat([self.init_probs, probs])
 
         return probs
@@ -123,12 +128,8 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                 head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
                 use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
+
         # Get the standard outputs from the original T5 model
-        # print(f"input_ids={input_ids},"
-        #       f"\nattention_mask={attention_mask},"
-        #       f"\ndecoder_input_ids={decoder_input_ids},"
-        #       f"\ndecoder_attention_mask={decoder_attention_mask},"
-        #       f"\ndecoder_inputs_embeds={decoder_inputs_embeds}")
         outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask,
                                   decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
                                   head_mask=head_mask, decoder_head_mask=decoder_head_mask,
@@ -138,19 +139,15 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                                   use_cache=use_cache, output_attentions=output_attentions,
                                   output_hidden_states=output_hidden_states, return_dict=return_dict)
 
-        # Use the last hidden state of the decoder (outputs.last_hidden_state)
+        # Use the last hidden state of the decoder (outputs.logits)
+        t5_logits = outputs.logits
 
-        hidden_states = outputs.logits
-        # print(f"{hidden_states.sum()=}")
-        # print(f"{hidden_states.max()=}")
-        # print(f"{hidden_states.min()=}")
-        # print(f"{torch.isfinite(hidden_states).sum()=}")
-        # print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
-
-        hidden_shape = hidden_states.shape
+        # print(f"{t5_logits=}")
+        # print(f"{t5_logits.shape=}")
+        hidden_shape = t5_logits.shape
         # Pass through the custom head to get mean and scale
         mean_scale = self.mean_scale_head(
-            hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
+            t5_logits.view(-1, t5_logits.size(2)))  # Use the hidden state of the last token
 
         # print(mean_scale.shape)
         mean = mean_scale[:, 0]
