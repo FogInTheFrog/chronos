@@ -70,13 +70,11 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         """Censored Gaussian using PyTorch.
 
         In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
-        Out: a 1d tensor of length N + 1:
+        Out: a 1d tensor of length N - 1:
         [
-            P(x < pt[0]),
             P(pt[0] < x < pt[1]),
              ...,
             P(pt[N - 2] < x < pt[N - 1]),
-            P(pt[N - 1] < x)
         ]
         for x ~ normal(mu, sigma)
         """
@@ -90,15 +88,14 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         cdf = 0.5 * (1 + special.erf((partition - mu) / (sigma * torch_sqrt)))
 
         # Append 1 to the cdf values
-        # Note: cdf[i] == P(x < pt[i]), cdf[-1] == P(x < float('inf')) == 1
-        cdf = torch.cat([cdf, torch.tensor([1.0]).to(sigma.device)])
 
         # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
         probs = cdf[1:] - cdf[:-1]
 
-        # Prepend P(x < pt[0]) to censored probs
-        init_prob = torch.tensor([cdf[0]], device=probs.device)
-        probs = torch.cat([init_prob, probs])
+        # Prepend P(x = special token 0) and P(x = special token 1)
+        # TODO: make this config-dependent
+        special_token_probs = torch.tensor([0, 0], device=probs.device)
+        probs = torch.cat([special_token_probs, probs])
 
         return probs
         
@@ -108,11 +105,11 @@ class T5ForMeanScale(T5ForConditionalGeneration):
                 past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
                 use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
         # Get the standard outputs from the original T5 model
-        print(f"input_ids={input_ids},"
-              f"\nattention_mask={attention_mask},"
-              f"\ndecoder_input_ids={decoder_input_ids},"
-              f"\ndecoder_attention_mask={decoder_attention_mask},"
-              f"\ndecoder_inputs_embeds={decoder_inputs_embeds}")
+        # print(f"input_ids={input_ids},"
+        #       f"\nattention_mask={attention_mask},"
+        #       f"\ndecoder_input_ids={decoder_input_ids},"
+        #       f"\ndecoder_attention_mask={decoder_attention_mask},"
+        #       f"\ndecoder_inputs_embeds={decoder_inputs_embeds}")
         outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask,
                                   decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
                                   head_mask=head_mask, decoder_head_mask=decoder_head_mask,
@@ -124,13 +121,13 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         # Use the last hidden state of the decoder (outputs.last_hidden_state)
         hidden_states = outputs.logits
-        print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
+        # print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
 
         hidden_shape = hidden_states.shape
         # Pass through the custom head to get mean and scale
         mean_scale = self.mean_scale_head(hidden_states.view(-1, hidden_states.size(2)))  # Use the hidden state of the last token
 
-        print(mean_scale.shape)
+        # print(mean_scale.shape)
         mean = mean_scale[:, 0]
         scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
         mean_scale_stacked = torch.stack((mean, scale), dim=-1)
@@ -138,14 +135,22 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
         # those partition should be already sorted
         partition = self.boundaries
-        print(f"partition.requires_grad={partition.requires_grad}")
+        # print(f"partition.requires_grad={partition.requires_grad}")
 
         # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
         # outputs = outputs.transpose(0, 1)
         probs = torch.stack([self.cg(output[0], output[1], partition) for output in mean_scale_stacked])
+        print(f"{probs=}")
+        probs = torch.clamp(probs, 1e-16, 1.0 - 1e-16)
+        log_probs = torch.log(probs)
+        print(f"{log_probs.shape=}")
+        # logfinite_mask = torch.isfinite(log_probs)
+        # print(f"{probs[logfinite_mask].shape=}")
+        # min_logfinite = torch.min(probs[logfinite_mask])
+        # min_global = 100*min_logfinite
+        # log_probs[~logfinite_mask] = min_global
 
-        # clipped prob so that log prob wont be -inf
-        probs = torch.clamp(probs, min=1e-10, max=1.0 - 1e-10)
+
 
         # log_probs = probs
 
@@ -156,10 +161,10 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         if labels is not None:
             labels = super()._shift_right(labels)
-            log_probs = torch.log(probs)  # Why this???
+            print(f"{torch.max(labels)=}")
             nll_loss = nn.NLLLoss(ignore_index=-100)
             loss = nll_loss(log_probs, labels.view(-1))
-            print(f"Loss:{loss}")
+            print(f"{loss=}")
 
         probs = probs.view(hidden_shape[0], hidden_shape[1], probs.shape[1])
         if not return_dict:
@@ -838,7 +843,7 @@ def main(
 
     trained_boundaries = model.boundaries
     # print(original_boundaries)
-    print(trained_boundaries)
+    # print(trained_boundaries)
     # Calculate the difference
     # difference = original_boundaries - trained_boundaries
 
