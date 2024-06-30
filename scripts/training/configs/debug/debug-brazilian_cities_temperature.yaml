@@ -1,5 +1,5 @@
 training_data_paths:
-- "/home/elan/chronos/datasets/taxi-2.arrow"
+- "/home/elan/chronos/datasets/train/brazilian_cities_temperature.arrow"
 probability:
 - 1.0
 context_length: 512

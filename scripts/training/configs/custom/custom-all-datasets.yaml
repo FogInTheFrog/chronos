@@ -1,12 +1,35 @@
-- "/home/elan/chronos/datasets/mydata500series.arrow"
-- "/home/elan/chronos/datasets/taxi-2.arrow"
+training_data_paths:
+ - "/home/elan/chronos/datasets/train/weatherbenchhourly.arrow"
+ - "/home/elan/chronos/datasets/train/spanish_energy_weather.arrow"
+ - "/home/elan/chronos/datasets/train/wikidaily.arrow"
+ - "/home/elan/chronos/datasets/train/mexico_city_bikes.arrow"
+ - "/home/elan/chronos/datasets/train/weatherbenchdaily.arrow"
+ - "/home/elan/chronos/datasets/train/windfarmsdaily.arrow"
+ - "/home/elan/chronos/datasets/train/weatherbenchweekly.arrow"
+ - "/home/elan/chronos/datasets/train/solar5minutes.arrow"
+ - "/home/elan/chronos/datasets/train/ushcnprcp.arrow"
+ - "/home/elan/chronos/datasets/train/windfarmshourly.arrow"
+ - "/home/elan/chronos/datasets/train/brazilian_cities_temperature.arrow"
+ - "/home/elan/chronos/datasets/train/taxi.arrow"
+ - "/home/elan/chronos/datasets/train/solar_hourly.arrow"
 probability:
-- 0.2
-- 0.8
+- 0.363
+- 0.018
+- 0.043
+- 0.027
+- 0.054
+- 0.018
+- 0.039
+- 0.031
+- 0.026
+- 0.018
+- 0.017
+- 0.018
+- 0.328
 context_length: 512
 prediction_length: 64
 min_past: 60
-max_steps: 10
+max_steps: 10_000
 save_steps: 100_000
 log_steps: 500
 per_device_train_batch_size: 8 #32

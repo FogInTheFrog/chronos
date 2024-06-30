@@ -437,7 +437,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         Data samples will be considered only if there's at least ``min_past``-many
         historical observations.
     mode
-        One of ``"training"``, ``"validation"``, or ``"test"``.
+        One of ``"training"``, ``"validation"``, or ``"debug"``.
     np_dtype
         Numpy float data type.
     """
@@ -459,7 +459,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         super().__init__()
 
         assert len(probabilities) == len(datasets)
-        assert mode in ("training", "validation", "test")
+        assert mode in ("training", "validation", "debug")
         assert model_type in ("seq2seq", "causal")
 
         self.datasets = datasets
@@ -496,7 +496,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         return entry
 
     def _create_instance_splitter(self, mode: str):
-        assert mode in ["training", "test", "validation"]
+        assert mode in ["training", "debug", "validation"]
 
         instance_sampler = {
             "training": ExpectedNumInstanceSampler(
@@ -505,7 +505,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
                 min_past=self.min_past,
                 min_future=self.prediction_length,
             ),
-            "test": TestSplitSampler(),
+            "debug": TestSplitSampler(),
             "validation": ValidationSplitSampler(min_future=self.prediction_length),
         }[mode]
 
@@ -531,7 +531,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         return data
 
     def create_test_data(self, data):
-        data = self._create_instance_splitter("test").apply(data, is_train=False)
+        data = self._create_instance_splitter("debug").apply(data, is_train=False)
         return data
 
     def create_validation_data(self, data):
@@ -607,7 +607,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
             iterables = [
                 self.create_training_data(dataset) for dataset in preprocessed_datasets
             ]
-        elif self.mode == "test":
+        elif self.mode == "debug":
             iterables = [
                 self.create_test_data(dataset) for dataset in preprocessed_datasets
             ]
