@@ -94,10 +94,8 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         # Prepend P(x = special token 0) and P(x = special token 1)
         # TODO: make this config-dependent
-        print(f"{probs.shape=}")
         special_token_probs = torch.tensor([0, 0, 0], device=probs.device)
         probs = torch.cat([special_token_probs, probs])
-        print(f"{probs.shape=}")
 
         return probs
         
@@ -123,6 +121,9 @@ class T5ForMeanScale(T5ForConditionalGeneration):
 
         # Use the last hidden state of the decoder (outputs.last_hidden_state)
         hidden_states = outputs.logits
+        print(f"{hidden_states.sum()=}")
+        print(f"{hidden_states.max()=}")
+        print(f"{hidden_states.min()=}")
         # print(f"hidden_states.shape={hidden_states.shape} and hidden_states.requires_grad={hidden_states.requires_grad}")
 
         hidden_shape = hidden_states.shape
@@ -137,15 +138,16 @@ class T5ForMeanScale(T5ForConditionalGeneration):
         #  shuffled_train_dataset.tokenizer is "MeanScaleUniformBins"  - those are boundaries of bins
         # those partition should be already sorted
         partition = self.boundaries
+        print(f"{partition=}")
+        print(f"{mean_scale_stacked[0][0]=}")
+        print(f"{mean_scale_stacked[0][1]=}")
         # print(f"partition.requires_grad={partition.requires_grad}")
 
         # probs = torch.tensor([cg(m, s, partition) for m, s in zip(mu, sigma)], dtype=torch.float32)
         # outputs = outputs.transpose(0, 1)
         probs = torch.stack([self.cg(output[0], output[1], partition) for output in mean_scale_stacked])
-        print(f"{probs=}")
-        probs = torch.clamp(probs, 1e-16, 1.0 - 1e-16)
+        probs = torch.clamp(probs, 0, 1) # ie not clamping probs
         log_probs = torch.log(probs)
-        print(f"{log_probs.shape=}")
         # logfinite_mask = torch.isfinite(log_probs)
         # print(f"{probs[logfinite_mask].shape=}")
         # min_logfinite = torch.min(probs[logfinite_mask])
