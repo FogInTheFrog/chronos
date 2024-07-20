@@ -1,31 +1,7 @@
 training_data_paths:
  - "/home/elan/chronos/datasets/weatherbenchhourly.arrow"
- - "/home/elan/chronos/datasets/spanish_energy_weather.arrow"
- - "/home/elan/chronos/datasets/wikidaily.arrow"
- - "/home/elan/chronos/datasets/mexico_city_bikes.arrow"
- - "/home/elan/chronos/datasets/weatherbenchdaily.arrow"
- - "/home/elan/chronos/datasets/windfarmsdaily.arrow"
- - "/home/elan/chronos/datasets/weatherbenchweekly.arrow"
- - "/home/elan/chronos/datasets/solar5minutes.arrow"
- - "/home/elan/chronos/datasets/ushcnprcp.arrow"
- - "/home/elan/chronos/datasets/windfarmshourly.arrow"
- - "/home/elan/chronos/datasets/brazilian_cities_temperature.arrow"
- - "/home/elan/chronos/datasets/taxi.arrow"
- - "/home/elan/chronos/datasets/solar_hourly.arrow"
 probability:
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
- - 0.076
+ - 1.0
 context_length: 512
 prediction_length: 64
 min_past: 60

@@ -81,20 +81,29 @@ class T5EnergyHeadWrapper(T5ForConditionalGeneration):
             self.forecast_points[0] = -10
             self.forecast_points[-1] = 10
 
-        self.quad_energy_head = nn.Linear(self.n_regular_tokens, self.n_regular_tokens)
-        self.lin_energy_head = nn.Linear(self.n_regular_tokens, self.n_regular_tokens)
-        self.bias_energy_head = nn.Linear(self.n_tokens, self.n_tokens)
+        self.quad_energy_head = nn.Linear(self.n_regular_tokens, 1)
+        self.lin_energy_head = nn.Linear(self.n_regular_tokens, 1)
+        self.bias_energy_head = nn.Linear(self.n_tokens, 3)
 
         torch.nn.init.xavier_uniform_(self.quad_energy_head.weight)
         torch.nn.init.xavier_uniform_(self.lin_energy_head.weight)
         torch.nn.init.xavier_uniform_(self.bias_energy_head.weight)
 
 
-    def forward(self, labels=None, return_dict=None, **kwargs):
+    def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
+                head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
+                past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
+                use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
 
-        t5_output = super().forward(
-            labels=labels, return_dict=return_dict, **kwargs
-        )
+        # Get the standard outputs from the original T5 model
+        t5_output = super().forward(input_ids=input_ids, attention_mask=attention_mask,
+                                  decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
+                                  head_mask=head_mask, decoder_head_mask=decoder_head_mask,
+                                  cross_attn_head_mask=cross_attn_head_mask, encoder_outputs=encoder_outputs,
+                                  past_key_values=past_key_values, inputs_embeds=inputs_embeds,
+                                  decoder_inputs_embeds=decoder_inputs_embeds, labels=labels,
+                                  use_cache=use_cache, output_attentions=output_attentions,
+                                  output_hidden_states=output_hidden_states, return_dict=return_dict)
         t5_logits = t5_output.logits
         t5_regular_logits = t5_logits[:, :, self.n_special_tokens:]
 
@@ -750,7 +759,7 @@ def main(
         max_steps=max_steps,
         gradient_accumulation_steps=gradient_accumulation_steps,
         dataloader_num_workers=dataloader_num_workers,
-        tf32=tf32,  # remove this if not using Ampere GPUs (e.g., A100)
+        # tf32=tf32,  # remove this if not using Ampere GPUs (e.g., A100)
         torch_compile=torch_compile,
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
