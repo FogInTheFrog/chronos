@@ -55,6 +55,32 @@ import torch.special as special
 from transformers import T5ForConditionalGeneration
 
 
+class T5EnergyHeadWrapper(nn.Module):
+
+    def __init__(self, config, partition):
+        super().__init__(config)
+
+        n_special_tokens = config.use_eos_token + 1
+        assert len(partition) == config.n_tokens - n_special_tokens
+        self.register_buffer('partition', partition)
+
+        self.quad_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
+        self.lin_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
+        self.bias_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
+
+        torch.nn.init.xavier_uniform_(self.quad_energy_head.weight)
+        torch.nn.init.xavier_uniform_(self.lin_energy_head.weight)
+        torch.nn.init.xavier_uniform_(self.bias_energy_head.weight)
+
+    def forward(self, **kwargs):
+
+        outputs = super().forward(**kwargs)
+        t5_logits = outputs.logits
+
+        
+
+
+
 class T5ForMeanScale(T5ForConditionalGeneration):
     def __init__(self, config, boundaries=None):
         super().__init__(config)
