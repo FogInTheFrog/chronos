@@ -1,6 +1,18 @@
 training_data_paths:
- - "/home/elan/chronos/datasets/weatherbenchhourly.arrow"
+ - "/home/elan/chronos/datasets/weather_bench_weekly.arrow"
+ - "/home/elan/chronos/datasets/weather_bench_daily"
+ - "/home/elan/chronos/datasets/weather_bench_hourly.arrow"
+ - "/home/elan/chronos/datasets/taxi.arrow"
+ - "/home/elan/chronos/datasets/solar_hourly.arrow"
+ - "/home/elan/chronos/datasets/solar5minutes.arrow"
+ - "/home/elan/chronos/datasets/brazilian_cities_temperature.arrow"
 probability:
+ - 1.0
+ - 1.0
+ - 1.0
+ - 1.0
+ - 1.0
+ - 1.0
  - 1.0
 context_length: 512
 prediction_length: 64
