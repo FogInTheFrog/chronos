@@ -55,23 +55,35 @@ import torch.special as special
 
 from transformers import T5ForConditionalGeneration
 
+DEVICE = torch.device("cuda")
 
 class T5EnergyHeadWrapper(T5ForConditionalGeneration):
     """A wrapper that takes a T5 and adds an extra layer on its output. This
     layer takes logit output h (of T5) and transforms it into a quadratic
     energy functional on the space of tokens."""
 
-    def __init__(self, config, forecast_points):
+    # TODO: Enable configuration of constants
+    # These need to be configured: self.n_tokens, self.n_special_tokens
+    def __init__(self, config, forecast_points=None):
         super().__init__(config)
 
-        self.n_special_tokens = config.use_eos_token + 1
-        self.n_regular_tokens = config.n_tokens - self.n_special_tokens
-        assert len(forecast_points) == self.n_regular_tokens
-        self.register_buffer('forecast_points', forecast_points)
+        # TODO: Read this from config instead.
+        # The `config` passed to `__init__` here can't do that; it's for T5 only.
+        self.n_tokens = 4096
+        self.n_special_tokens = 2
+        self.n_regular_tokens = 4096 - self.n_special_tokens
+        assert forecast_points is None or len(forecast_points) == self.n_regular_tokens
 
-        self.quad_energy_head = nn.Linear(config.n_regular_tokens, config.n_tokens)
-        self.lin_energy_head = nn.Linear(config.n_regular_tokens, config.n_tokens)
-        self.bias_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
+        if forecast_points is None:
+            self.forecast_points = torch.zeros(4094, requires_grad=False).to(DEVICE)
+        else:
+            self.register_buffer('forecast_points', forecast_points)
+            self.forecast_points[0] = -10
+            self.forecast_points[-1] = 10
+
+        self.quad_energy_head = nn.Linear(self.n_regular_tokens, self.n_regular_tokens)
+        self.lin_energy_head = nn.Linear(self.n_regular_tokens, self.n_regular_tokens)
+        self.bias_energy_head = nn.Linear(self.n_tokens, self.n_tokens)
 
         torch.nn.init.xavier_uniform_(self.quad_energy_head.weight)
         torch.nn.init.xavier_uniform_(self.lin_energy_head.weight)
@@ -84,36 +96,34 @@ class T5EnergyHeadWrapper(T5ForConditionalGeneration):
             labels=labels, return_dict=return_dict, **kwargs
         )
         t5_logits = t5_output.logits
-        t5_regular_logits = t5_logits[self.n_special_tokens:]
+        t5_regular_logits = t5_logits[:, :, self.n_special_tokens:]
 
         quad_energy_coefs = self.quad_energy_head(t5_regular_logits)
         lin_energy_coefs = self.lin_energy_head(t5_regular_logits)
         bias_energy_coefs = self.bias_energy_head(t5_logits)
-        special_bias_energy_coefs = bias_energy_coefs[:self.n_special_tokens]
-        regular_bias_energy_coefs = bias_energy_coefs[self.n_special_tokens:]
+
+        special_bias_energy_coefs = bias_energy_coefs[:, :, :self.n_special_tokens]
+        regular_bias_energy_coefs = bias_energy_coefs[:, :, self.n_special_tokens:]
 
         # Compute the energy functional.
         special_energy = special_bias_energy_coefs
+        energy_coef_dim = quad_energy_coefs.shape
         regular_energy \
             = quad_energy_coefs * (self.forecast_points ** 2) \
             + lin_energy_coefs * self.forecast_points \
             + regular_bias_energy_coefs
-        energy = torch.cat([special_energy, regular_energy])
+        energy = torch.cat([special_energy, regular_energy], dim=-1)
 
         # Compute the Boltzmann distribution associated with this energy.
-        probs = F.softmax(-energy)
-        log_probs = F.log_softmax(-energy)
-
+        log_probs = F.log_softmax(-energy, dim=-1)
         loss_fn = nn.NLLLoss(ignore_index=-100, reduction="mean")
-        loss = loss_fn(log_probs, labels.view(-1))
-        print(f"{loss.item()=}")
+        loss = loss_fn(log_probs.view(-1, self.n_tokens), labels.view(-1))
 
-        probs = probs.view(t5_logits.shape[0], t5_logits.shape[1], probs.shape[1])
         if not return_dict:
-            return loss, probs
+            return loss, log_probs
 
         t5_output["loss"] = loss
-        t5_output["logits"] = probs
+        t5_output["logits"] = log_probs
         return t5_output
 
 

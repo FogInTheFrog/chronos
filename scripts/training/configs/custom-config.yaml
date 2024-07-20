@@ -24,11 +24,11 @@ random_init: false
 tie_embeddings: true
 output_dir: ./output/
 tf32: true
-torch_compile: true
+torch_compile: false
 tokenizer_class: "MeanScaleUniformBins"
 tokenizer_kwargs:
-  low_limit: -15.0
-  high_limit: 15.0
+  low_limit: -10.0
+  high_limit: 10.0
 n_tokens: 4096
 lr_scheduler_type: linear
 warmup_ratio: 0.0
