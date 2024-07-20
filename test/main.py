@@ -3,7 +3,7 @@ import torch
 from chronos import ChronosPipeline
 
 pipeline = ChronosPipeline.from_pretrained(
-    "/home/jzacharczuk/studia/nlp/chronos-forecasting/scripts/training/output/run-56/checkpoint-final",
+    "/home/elan/chronos/scripts/training/output/run-56/checkpoint-final",
     # "amazon/chronos-t5-small",
     device_map="cpu",  # use "cpu" for CPU inference and "mps" for Apple Silicon
     torch_dtype=torch.bfloat16,

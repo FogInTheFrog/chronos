@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset, get_worker_info
+import torch.nn.functional as F
 import transformers
 from transformers import (
     AutoModelForSeq2SeqLM,
@@ -55,151 +56,65 @@ import torch.special as special
 from transformers import T5ForConditionalGeneration
 
 
-class T5EnergyHeadWrapper(nn.Module):
+class T5EnergyHeadWrapper(T5ForConditionalGeneration):
+    """A wrapper that takes a T5 and adds an extra layer on its output. This
+    layer takes logit output h (of T5) and transforms it into a quadratic
+    energy functional on the space of tokens."""
 
-    def __init__(self, config, partition):
+    def __init__(self, config, forecast_points):
         super().__init__(config)
 
-        n_special_tokens = config.use_eos_token + 1
-        assert len(partition) == config.n_tokens - n_special_tokens
-        self.register_buffer('partition', partition)
+        self.n_special_tokens = config.use_eos_token + 1
+        self.n_regular_tokens = config.n_tokens - self.n_special_tokens
+        assert len(forecast_points) == self.n_regular_tokens
+        self.register_buffer('forecast_points', forecast_points)
 
-        self.quad_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
-        self.lin_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
+        self.quad_energy_head = nn.Linear(config.n_regular_tokens, config.n_tokens)
+        self.lin_energy_head = nn.Linear(config.n_regular_tokens, config.n_tokens)
         self.bias_energy_head = nn.Linear(config.n_tokens, config.n_tokens)
 
         torch.nn.init.xavier_uniform_(self.quad_energy_head.weight)
         torch.nn.init.xavier_uniform_(self.lin_energy_head.weight)
         torch.nn.init.xavier_uniform_(self.bias_energy_head.weight)
 
-    def forward(self, **kwargs):
 
-        outputs = super().forward(**kwargs)
-        t5_logits = outputs.logits
+    def forward(self, labels=None, return_dict=None, **kwargs):
 
-        
+        t5_output = super().forward(
+            labels=labels, return_dict=return_dict, **kwargs
+        )
+        t5_logits = t5_output.logits
+        t5_regular_logits = t5_logits[self.n_special_tokens:]
 
+        quad_energy_coefs = self.quad_energy_head(t5_regular_logits)
+        lin_energy_coefs = self.lin_energy_head(t5_regular_logits)
+        bias_energy_coefs = self.bias_energy_head(t5_logits)
+        special_bias_energy_coefs = bias_energy_coefs[:self.n_special_tokens]
+        regular_bias_energy_coefs = bias_energy_coefs[self.n_special_tokens:]
 
+        # Compute the energy functional.
+        special_energy = special_bias_energy_coefs
+        regular_energy \
+            = quad_energy_coefs * (self.forecast_points ** 2) \
+            + lin_energy_coefs * self.forecast_points \
+            + regular_bias_energy_coefs
+        energy = torch.cat([special_energy, regular_energy])
 
-class T5ForMeanScale(T5ForConditionalGeneration):
-    def __init__(self, config, boundaries=None):
-        super().__init__(config)
-        # Additional layer to project the hidden states to mean and scale
-        self.mean_scale_head = nn.Sequential(
-            nn.Linear(4096, 128),
-            nn.ReLU(),
-            nn.Linear(128, 16),
-            nn.ReLU(),
-            nn.Linear(16, 2)
-        )# Output two values: mean and scale
-        if boundaries is None:
-           self.boundaries = torch.zeros(4094, requires_grad=False).to(torch.device("cuda"))
-        else:
-            self.register_buffer('boundaries', boundaries)
+        # Compute the Boltzmann distribution associated with this energy.
+        probs = F.softmax(-energy)
+        log_probs = F.log_softmax(-energy)
 
-        self.init_probs = torch.tensor([0, 0, 0]).to(torch.device("cuda"))
+        loss_fn = nn.NLLLoss(ignore_index=-100, reduction="mean")
+        loss = loss_fn(log_probs, labels.view(-1))
+        print(f"{loss.item()=}")
 
-        torch.nn.init.xavier_uniform_(self.mean_scale_head[0].weight)
-        torch.nn.init.xavier_uniform_(self.mean_scale_head[2].weight)
-        torch.nn.init.xavier_uniform_(self.mean_scale_head[4].weight)
-
-    def cg_vectorized(self, mu, sigma):
-        """Vectorized Censored Gaussian using PyTorch.
-
-        In: mu, sigma, 2D tensors of shape (batch_size, 1)
-        Out: a 2D tensor of shape (batch_size, N)
-        where N is the number of probability bins
-        """
-        # Expand boundaries to match batch size
-        expanded_boundaries = self.boundaries.unsqueeze(0).expand(mu.size(0), -1)
-
-        # Calculate the cumulative distribution function values
-        cdf = 0.5 * (1 + torch.erf((expanded_boundaries - mu.unsqueeze(1)) / (sigma.unsqueeze(1) * torch.sqrt(
-            torch.tensor(2).to(
-                torch.device("cuda")
-            )
-        ))))
-
-        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
-        probs = cdf[:, 1:] - cdf[:, :-1]
-
-        # Prepend P(x = special token 0) and P(x = special token 1)
-        probs = torch.cat([self.init_probs.expand(mu.size(0), -1), probs], dim=1)
-
-        return probs
-
-    def cg(self, mu, sigma):
-        """Censored Gaussian using PyTorch.
-
-        In: mu, sigma, a 1d tensor of length N: [pt[0], pt[1], ..., pt[N - 1]]
-        Out: a 1d tensor of length N - 1:
-        [
-            P(pt[0] < x < pt[1]),
-             ...,
-            P(pt[N - 2] < x < pt[N - 1]),
-        ]
-        for x ~ normal(mu, sigma)
-        """
-
-        # Calculate the cumulative distribution function values
-        cdf = 0.5 * (1 + special.erf((self.boundaries - mu) / (sigma * torch.sqrt(torch.tensor(2).to(sigma.device)))))
-
-        # Compute P(pt[i] <= x <= pt[i + 1]) as P(x < pt[i + 1]) - P(x < pt[i])
-        probs = cdf[1:] - cdf[:-1]
-
-        # Prepend P(x = special token 0) and P(x = special token 1)
-        probs = torch.cat([self.init_probs, probs])
-
-        return probs
-
-    def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, decoder_attention_mask=None,
-                head_mask=None, decoder_head_mask=None, cross_attn_head_mask=None, encoder_outputs=None,
-                past_key_values=None, inputs_embeds=None, decoder_inputs_embeds=None, labels=None,
-                use_cache=None, output_attentions=None, output_hidden_states=None, return_dict=None):
-
-        # Get the standard outputs from the original T5 model
-        outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask,
-                                  decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
-                                  head_mask=head_mask, decoder_head_mask=decoder_head_mask,
-                                  cross_attn_head_mask=cross_attn_head_mask, encoder_outputs=encoder_outputs,
-                                  past_key_values=past_key_values, inputs_embeds=inputs_embeds,
-                                  decoder_inputs_embeds=decoder_inputs_embeds, labels=labels,
-                                  use_cache=use_cache, output_attentions=output_attentions,
-                                  output_hidden_states=output_hidden_states, return_dict=return_dict)
-
-        # Use the last state of the decoder (outputs.logits)
-        t5_logits = outputs.logits
-
-        hidden_shape = t5_logits.shape
-        # Pass through the custom head to get mean and scale
-        mean_scale = self.mean_scale_head(
-            t5_logits.view(-1, t5_logits.size(2)))  # Use the hidden state of the last token
-
-        # print(mean_scale.shape)
-        mean = mean_scale[:, 0]
-        scale = torch.relu(mean_scale[:, 1] - 1e-10) + 1e-10
-
-        probs = self.cg_vectorized(mean, scale)
-        probs = torch.clamp(probs, 1e-16, 1 - 1e-16)  # ie not clamping probs
-        log_probs = torch.log(probs)
-
-
-        # that model that we use say to ignore token -100,
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L1771
-        loss = None
-
-        if labels is not None:
-            nll_loss = nn.NLLLoss(ignore_index=-100, reduction="mean")
-            loss = nll_loss(log_probs, labels.view(-1))
-            print(f"{loss.item()=}")
-
-        probs = probs.view(hidden_shape[0], hidden_shape[1], probs.shape[1])
+        probs = probs.view(t5_logits.shape[0], t5_logits.shape[1], probs.shape[1])
         if not return_dict:
             return loss, probs
 
-        outputs["loss"] = loss
-        outputs["logits"] = probs
-        return outputs
+        t5_output["loss"] = loss
+        t5_output["logits"] = probs
+        return t5_output
 
 
 app = typer.Typer(pretty_exceptions_enable=False)
@@ -326,7 +241,7 @@ def load_model(
     """
     assert model_type in ["seq2seq", "causal"]
     AutoModelClass = (
-        T5ForMeanScale if model_type == "seq2seq" else None
+        T5EnergyHeadWrapper if model_type == "seq2seq" else None
     )  # Load T5ForMeanScale for seq2seq model type
 
     print(f"boundaries: {boundaries}")
@@ -339,7 +254,7 @@ def load_model(
         config.initializer_factor = 0.05
         config.tie_word_embeddings = tie_embeddings
 
-        model = AutoModelClass(config, boundaries=boundaries)
+        model = AutoModelClass(config, forecast_points=boundaries)
     else:
         print(f"Using pretrained initialization from {model_id}")
         model = AutoModelClass.from_pretrained(model_id)

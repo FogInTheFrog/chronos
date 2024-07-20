@@ -1,7 +1,11 @@
 training_data_paths:
-- "/home/jzacharczuk/studia/nlp/chronos-forecasting/scripts/kernelsynth-data.arrow"
+- "/home/elan/chronos/datasets/spanish_energy_weather.arrow"
+- "/home/elan/chronos/datasets/mexico_city_bikes.arrow"
+- "/home/elan/chronos/datasets/weatherbenchhourly.arrow"
 probability:
-- 1.0
+- 0.3
+- 0.3
+- 0.3
 context_length: 512
 prediction_length: 64
 min_past: 60
