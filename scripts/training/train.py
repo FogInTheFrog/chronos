@@ -81,9 +81,9 @@ class T5EnergyHeadWrapper(T5ForConditionalGeneration):
             self.forecast_points[0] = -10
             self.forecast_points[-1] = 10
 
-        self.quad_energy_head = nn.Linear(self.n_regular_tokens, 1)
-        self.lin_energy_head = nn.Linear(self.n_regular_tokens, 1)
-        self.bias_energy_head = nn.Linear(self.n_tokens, 3)
+        self.quad_energy_head = nn.Linear(self.n_regular_tokens, 4094)
+        self.lin_energy_head = nn.Linear(self.n_regular_tokens, 4094)
+        self.bias_energy_head = nn.Linear(self.n_tokens, 4096)
 
         torch.nn.init.xavier_uniform_(self.quad_energy_head.weight)
         torch.nn.init.xavier_uniform_(self.lin_energy_head.weight)
@@ -116,7 +116,6 @@ class T5EnergyHeadWrapper(T5ForConditionalGeneration):
 
         # Compute the energy functional.
         special_energy = special_bias_energy_coefs
-        energy_coef_dim = quad_energy_coefs.shape
         regular_energy \
             = quad_energy_coefs * (self.forecast_points ** 2) \
             + lin_energy_coefs * self.forecast_points \
